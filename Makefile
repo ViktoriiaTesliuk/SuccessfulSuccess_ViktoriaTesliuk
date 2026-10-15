@@ -39,6 +39,7 @@ AUTH_STACK ?= $(PROJECT_NAME)-auth
 APP_STACK ?= $(PROJECT_NAME)-backend
 ECR_STACK ?= $(PROJECT_NAME)-ecr
 FRONTEND_STACK ?= $(PROJECT_NAME)-frontend
+REPORTS_STACK ?= $(PROJECT_NAME)-reports
 IMAGE_TAG ?= latest
 # x86_64 or arm64. arm64 is ~20% cheaper on Lambda and builds natively on
 # Apple Silicon; the image platform is derived from it so the two cannot drift.
@@ -348,11 +349,79 @@ aws-deploy-frontend: ## Deploy the frontend to S3 + CloudFront, built against th
 aws-frontend-url: ## Print the deployed site URL
 	@$(call stack-output,$(FRONTEND_STACK),SiteUrl)
 
+aws-verify-email: ## Verify an email address in SES: make aws-verify-email EMAIL=user@example.com
+	$(require-aws-credentials)
+	@test -n "$(EMAIL)" || { echo "Specify EMAIL=user@example.com"; exit 1; }
+	$(AWS) sesv2 create-email-identity --email-identity "$(EMAIL)"
+	@echo "Verification email sent to $(EMAIL). Please check your inbox and click the verification link."
+
+aws-deploy-reports: aws-push ## Deploy the event-driven weekly reports stack (S3 + SQS + Builder + Mailer + Scheduler)
+	$(require-aws-credentials)
+	@fn=$$($(call stack-output,$(APP_STACK),FunctionName) 2>/dev/null | tr -d '[:space:]'); \
+		test -n "$$fn" -a "$$fn" != "None" || { \
+			echo "Backend stack not found. Run make aws-deploy-backend first."; exit 1; }; \
+		vpc=$$($(AWS) lambda get-function-configuration --function-name "$$fn" --query 'VpcConfig.VpcId' --output text | tr -d '[:space:]'); \
+		subnets=$$($(AWS) lambda get-function-configuration --function-name "$$fn" --query 'VpcConfig.SubnetIds[]' --output text | tr '[:space:]' ',' | sed 's/,*$$//'); \
+		sg=$$($(AWS) lambda get-function-configuration --function-name "$$fn" --query 'VpcConfig.SecurityGroupIds[0]' --output text | tr -d '[:space:]'); \
+		dburl=$$($(AWS) lambda get-function-configuration --function-name "$$fn" --query 'Environment.Variables.DATABASE_URL' --output text | tr -d '[:space:]'); \
+		repo=$$($(call stack-output,$(ECR_STACK),RepositoryUri) | tr -d '[:space:]'); \
+		digest=$$($(AWS) ecr describe-images --repository-name "$${repo#*/}" --image-ids imageTag=$(IMAGE_TAG) --query 'imageDetails[0].imageDigest' --output text | tr -d '[:space:]'); \
+		routetables=$$($(AWS) ec2 describe-route-tables --filters Name=vpc-id,Values=$$vpc --query 'RouteTables[].RouteTableId' --output text | tr '[:space:]' ',' | sed 's/,*$$//'); \
+		sender="$(or $(AWS_REPORT_SENDER),$(AWS_REPORT_RECIPIENT))"; \
+		recipient="$(AWS_REPORT_RECIPIENT)"; \
+		test -n "$$recipient" || { echo "Please set AWS_REPORT_RECIPIENT in .env (e.g. AWS_REPORT_RECIPIENT=your-email@example.com)"; exit 1; }; \
+		echo "Deploying reports stack with sender=$$sender recipient=$$recipient vpc=$$vpc"; \
+		$(call wait-stack-idle,$(REPORTS_STACK)); \
+		$(call clear-failed-create,$(REPORTS_STACK)); \
+		$(AWS) cloudformation deploy \
+			--stack-name $(REPORTS_STACK) \
+			--template-file infra/reports.yml \
+			--capabilities CAPABILITY_IAM \
+			--no-fail-on-empty-changeset \
+			$(STACK_TAGS) \
+			--parameter-overrides \
+				"ProjectName=$(PROJECT_NAME)" \
+				"VpcId=$$vpc" \
+				"SubnetIds=$$subnets" \
+				"RouteTableIds=$$routetables" \
+				"FunctionSecurityGroupId=$$sg" \
+				"DatabaseUrl=$$dburl" \
+				ImageUri="$$repo@$$digest" \
+				"Architecture=$(AWS_LAMBDA_ARCH)" \
+				"AppTimezone=$(APP_TIMEZONE)" \
+				"SenderEmail=$$sender" \
+				"RecipientEmail=$$recipient"
+
+report-now: ## Trigger on-demand weekly report: make report-now [WEEK=2026-W39]
+	$(require-aws-credentials)
+	@q=$$($(call stack-output,$(REPORTS_STACK),QueueUrl) 2>/dev/null | tr -d '[:space:]'); \
+		test -n "$$q" -a "$$q" != "None" || { \
+			echo "Reports stack not found — run: make aws-deploy-reports"; exit 1; }; \
+		week="$(WEEK)"; \
+		if [ -n "$$week" ]; then \
+			payload="{\"week\": \"$$week\", \"source\": \"sqs\"}"; \
+		else \
+			payload="{\"week\": null, \"source\": \"sqs\"}"; \
+		fi; \
+		echo "Sending SQS message to $$q: $$payload"; \
+		$(AWS) sqs send-message --queue-url "$$q" --message-body "$$payload" --output json
+
+aws-reports-status: ## Show outputs of the reports stack
+	@$(AWS) cloudformation describe-stacks --stack-name $(REPORTS_STACK) \
+		--query 'Stacks[0].Outputs' --output table
+
 aws-destroy: ## Delete every stack, including the database and its data
 	$(require-aws-credentials)
-	@printf 'Delete %s, %s, %s and %s? The Aurora cluster and all its data, and every user account, go with them (no snapshot). Type yes: ' \
-		"$(FRONTEND_STACK)" "$(APP_STACK)" "$(AUTH_STACK)" "$(ECR_STACK)"; \
+	@printf 'Delete %s, %s, %s, %s and %s? The Aurora cluster and all its data, and every user account, go with them (no snapshot). Type yes: ' \
+		"$(REPORTS_STACK)" "$(FRONTEND_STACK)" "$(APP_STACK)" "$(AUTH_STACK)" "$(ECR_STACK)"; \
 		read answer; test "$$answer" = "yes" || { echo "Aborted."; exit 1; }
+	@rep_bucket=$$($(call stack-output,$(REPORTS_STACK),ReportsBucketName) 2>/dev/null | tr -d '[:space:]'); \
+		if [ -n "$$rep_bucket" ] && [ "$$rep_bucket" != "None" ]; then \
+			echo "Emptying s3://$$rep_bucket"; \
+			$(AWS) s3 rm "s3://$$rep_bucket" --recursive --only-show-errors || true; \
+		fi
+	-$(AWS) cloudformation delete-stack --stack-name $(REPORTS_STACK)
+	-$(AWS) cloudformation wait stack-delete-complete --stack-name $(REPORTS_STACK)
 	@bucket=$$($(call stack-output,$(FRONTEND_STACK),BucketName) 2>/dev/null | tr -d '[:space:]'); \
 		if [ -n "$$bucket" ] && [ "$$bucket" != "None" ]; then \
 			echo "Emptying s3://$$bucket"; \
@@ -360,6 +429,7 @@ aws-destroy: ## Delete every stack, including the database and its data
 		fi
 	-$(AWS) cloudformation delete-stack --stack-name $(FRONTEND_STACK)
 	-$(AWS) cloudformation wait stack-delete-complete --stack-name $(FRONTEND_STACK)
+
 	@echo "Deleting $(APP_STACK) — Lambda releases its VPC network interfaces slowly, allow ~20 minutes."
 	$(AWS) cloudformation delete-stack --stack-name $(APP_STACK)
 	$(AWS) cloudformation wait stack-delete-complete --stack-name $(APP_STACK)
