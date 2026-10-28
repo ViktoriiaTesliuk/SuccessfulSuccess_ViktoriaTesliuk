@@ -51,7 +51,7 @@ Evaluated against `PARSER_MODEL = us.anthropic.claude-haiku-4-5-20251001-v1:0` (
 Captured from `/aws/lambda/successfulsuccess-agenda-parser`:
 
 ```json
-{"event": "agenda_parsed", "user": "09420947-2391-44ab-9abc-1234567890ab", "model": "us.anthropic.claude-haiku-4-5-20251001-v1:0", "prompt_version": "agenda-v1", "usage": {"input_tokens": 1258, "output_tokens": 312}, "latency_ms": 2009, "cost_usd": 0.000282}
+{"event": "agenda_parsed", "user": "84b81478-1031-7060-f6cc-7d2d912c3436", "model": "us.anthropic.claude-haiku-4-5-20251001-v1:0", "prompt_version": "agenda-v1", "usage": {"input_tokens": 1256, "output_tokens": 312}, "latency_ms": 3614, "cost_usd": 0.000282}
 ```
 
 ---
