@@ -447,9 +447,8 @@ aws-deploy-agenda: aws-push ## Deploy the LLM agenda parser stack (infra/as.yml)
 	$(require-aws-credentials)
 	@repo=$$($(call stack-output,$(ECR_STACK),RepositoryUri) | tr -d '[:space:]'); \
 		digest=$$($(AWS) ecr describe-images --repository-name "$${repo#*/}" --image-ids imageTag=$(IMAGE_TAG) --query 'imageDetails[0].imageDigest' --output text | tr -d '[:space:]'); \
-		auth_out() { $(call stack-output,$(AUTH_STACK),$$1) | tr -d '[:space:]'; }; \
-		pool="$$(auth_out UserPoolId)"; \
-		client="$$(auth_out UserPoolClientId)"; \
+		pool=$$($(call stack-output,$(AUTH_STACK),UserPoolId) 2>/dev/null | tr -d '[:space:]'); \
+		client=$$($(call stack-output,$(AUTH_STACK),UserPoolClientId) 2>/dev/null | tr -d '[:space:]'); \
 		allowed=$$($(call stack-output,$(FRONTEND_STACK),AllowedOrigins) 2>/dev/null | tr -d '[:space:]'); \
 		origins="$${AWS_CORS_ORIGINS:-$${allowed:-*}}"; \
 		model="$${PARSER_MODEL:-us.anthropic.claude-haiku-4-5-20251001-v1:0}"; \
