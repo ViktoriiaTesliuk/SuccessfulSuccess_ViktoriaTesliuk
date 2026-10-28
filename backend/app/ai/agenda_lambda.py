@@ -85,17 +85,16 @@ def verify_cognito_token(auth_header: str | None) -> AuthUser:
 def make_response(
     status_code: int,
     body_data: dict[str, Any],
-    origin: str | None = None,
 ) -> dict[str, Any]:
-    """Helper to return consistent JSON responses with CORS headers."""
-    cors_origin = origin or "*"
+    """Helper to return consistent JSON responses.
+    
+    CORS headers are handled natively by AWS::Lambda::Url configuration.
+    Adding them here would result in duplicate headers that browsers reject.
+    """
     return {
         "statusCode": status_code,
         "headers": {
             "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": cors_origin,
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization",
         },
         "body": json.dumps(body_data, ensure_ascii=False),
     }
@@ -104,16 +103,15 @@ def make_response(
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     """Lambda entry point for agenda parsing."""
     headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
-    origin = headers.get("origin")
 
-    # Handle CORS preflight
+    # Handle CORS preflight if passed through by Lambda Function URL
     http_method = (
         event.get("requestContext", {}).get("http", {}).get("method")
         or event.get("httpMethod")
         or ""
     ).upper()
     if http_method == "OPTIONS":
-        return make_response(200, {"status": "ok"}, origin=origin)
+        return make_response(200, {"status": "ok"})
 
     # 1. Authentication check
     auth_header = headers.get("authorization")
@@ -121,7 +119,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         user = verify_cognito_token(auth_header)
     except Exception as exc:
         logger.warning("Authentication failed: %s", exc)
-        return make_response(401, {"error": f"Unauthorized: {exc}"}, origin=origin)
+        return make_response(401, {"error": f"Unauthorized: {exc}"})
 
     # 2. Parse request body
     raw_body = event.get("body", "{}")
@@ -133,18 +131,17 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     try:
         body = json.loads(raw_body) if isinstance(raw_body, str) else raw_body
     except Exception as exc:
-        return make_response(400, {"error": f"Invalid JSON body: {exc}"}, origin=origin)
+        return make_response(400, {"error": f"Invalid JSON body: {exc}"})
 
     text = body.get("text", "")
     if not isinstance(text, str) or not text.strip():
-        return make_response(400, {"error": "Missing or empty 'text' field"}, origin=origin)
+        return make_response(400, {"error": "Missing or empty 'text' field"})
 
     # 3. Limit text length
     if len(text) > 10_000:
         return make_response(
             413,
             {"error": f"Text too long: {len(text)} characters (max 10,000)"},
-            origin=origin,
         )
 
     # 4. Extract today and timezone
@@ -164,10 +161,10 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         agenda, usage = parse_agenda(text, today, tz, model=model)
     except AgendaParseError as exc:
         logger.warning("Agenda parsing failed: %s", exc)
-        return make_response(422, {"error": str(exc)}, origin=origin)
+        return make_response(422, {"error": str(exc)})
     except Exception as exc:
         logger.error("Unexpected error during parsing: %s", exc, exc_info=True)
-        return make_response(500, {"error": f"Internal server error: {exc}"}, origin=origin)
+        return make_response(500, {"error": f"Internal server error: {exc}"})
 
     latency_ms = int((time.monotonic() - started) * 1000)
     cost = cost_usd(model, usage)
@@ -191,5 +188,4 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             "model": model,
             "prompt_version": PROMPT_VERSION,
         },
-        origin=origin,
     )
