@@ -236,16 +236,13 @@ async def generate_weekly_report_csv(session: AsyncSession, week: str) -> str:
 
 async def _run_async(week: str) -> bytes:
     report_engine = create_async_engine(settings.database_url, poolclass=NullPool)
-    session_factory = async_sessionmaker(
-        report_engine, expire_on_commit=False, autoflush=False
-    )
+    session_factory = async_sessionmaker(report_engine, expire_on_commit=False, autoflush=False)
     try:
         async with session_factory() as session:
             csv_text = await generate_weekly_report_csv(session, week)
             return csv_text.encode("utf-8")
     finally:
         await report_engine.dispose()
-
 
 
 def build_weekly_report(week: str) -> bytes:

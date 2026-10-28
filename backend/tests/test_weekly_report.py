@@ -208,7 +208,6 @@ def test_builder_lambda_handler_sqs(monkeypatch):
     assert uploaded["Key"] == "reports/2026-W39.csv"
 
 
-
 def test_mailer_lambda_handler(monkeypatch):
     import io
 
@@ -247,4 +246,3 @@ def test_mailer_lambda_handler(monkeypatch):
     raw_bytes = sent_emails[0]["Content"]["Raw"]["Data"]
     assert b"Weekly Meetings Report: 2026-W40.csv" in raw_bytes
     assert b'filename="2026-W40.csv"' in raw_bytes
-

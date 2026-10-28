@@ -2,16 +2,21 @@ import { signOut } from "aws-amplify/auth"
 
 import { getAccessToken } from "@/lib/auth"
 import type {
+  AgendaSaveInput,
   ApiErrorBody,
   ApiErrorDetail,
   Meeting,
   MeetingCreateInput,
   MeetingList,
+  ParseAgendaResponse,
   UserProfile,
 } from "@/lib/types"
 
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
+
+export const AGENDA_PARSER_URL =
+  process.env.NEXT_PUBLIC_AGENDA_PARSER_URL ?? ""
 
 export class ApiError extends Error {
   readonly code: string
@@ -98,6 +103,71 @@ export function updateMeeting(id: string, payload: MeetingCreateInput) {
 
 export function deleteMeeting(id: string) {
   return request<void>(`/api/v1/meetings/${id}`, { method: "DELETE" })
+}
+
+export async function parseAgendaText(
+  text: string,
+  today: string,
+  tz: string,
+  signal?: AbortSignal,
+): Promise<ParseAgendaResponse> {
+  const token = await getAccessToken()
+  const targetUrl = AGENDA_PARSER_URL || `${API_BASE_URL}/api/v1/agenda/parse`
+
+  if (text.length > 10000) {
+    throw new ApiError(413, "text_too_long", "The text exceeds the 10,000 character limit.", [])
+  }
+
+  let response: Response
+  try {
+    response = await fetch(targetUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ text, today, tz }),
+      signal,
+    })
+  } catch (err: unknown) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw err
+    }
+    throw new ApiError(0, "network_error", "Network failed. Could not reach the agenda parser.", [])
+  }
+
+  if (response.status === 429) {
+    throw new ApiError(429, "throttled", "The service is busy (throttling). Please try again shortly.", [])
+  }
+  if (response.status === 413) {
+    throw new ApiError(413, "text_too_long", "The text exceeds the 10,000 character limit.", [])
+  }
+
+  const resText = await response.text()
+  let data: { error?: string; agenda?: unknown; model?: string; prompt_version?: string } | null = null
+  try {
+    data = resText ? JSON.parse(resText) : null
+  } catch {
+    data = null
+  }
+
+  if (!response.ok) {
+    throw new ApiError(
+      response.status,
+      "parse_error",
+      data?.error ?? `Parsing failed with status ${response.status}.`,
+      [],
+    )
+  }
+
+  return data as unknown as ParseAgendaResponse
+}
+
+export function saveMeetingAgenda(meetingId: string, payload: AgendaSaveInput) {
+  return request<Meeting>(`/api/v1/meetings/${meetingId}/agenda`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  })
 }
 
 export function getMe() {

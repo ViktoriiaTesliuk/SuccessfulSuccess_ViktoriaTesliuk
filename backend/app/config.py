@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # empty they are fetched from Cognito on first use.
     cognito_jwks: str = ""
 
+    # LLM agenda parser model (Step 1)
+    parser_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
     @field_validator("app_timezone")
     @classmethod
     def _validate_timezone(cls, value: str) -> str:

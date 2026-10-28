@@ -1,0 +1,55 @@
+```mermaid
+flowchart TD
+    user["User / Browser"]
+
+    subgraph AWS_Cloud ["AWS Cloud (us-east-1)"]
+        subgraph Public_Zone ["Public Zone / Outside VPC"]
+            frontend["Frontend SPA\n(Next.js on CloudFront + S3)"]
+            cognito["Amazon Cognito\n(User Pool Auth)"]
+            
+            subgraph Agenda_Parser_Stack ["Agenda Parser (Lab 6)"]
+                agenda_url["Function URL\nPOST /"]
+                agenda_lambda["Lambda agenda-parser\n(outside VPC, 512 MB)"]
+            end
+            
+            bedrock["Amazon Bedrock\n(Anthropic Claude Haiku / Opus)"]
+        end
+
+        subgraph VPC ["Default VPC (No NAT)"]
+            subgraph Backend_Stack ["Backend API"]
+                api_url["Function URL / API"]
+                api_lambda["Lambda backend-api\n(inside VPC)"]
+            end
+            
+            subgraph Storage ["Database"]
+                aurora[("Aurora PostgreSQL Serverless v2\n(meetings, users, agendas)")]
+            end
+        end
+    end
+
+    %% Interactions
+    user -->|"1. Visits app"| frontend
+    user -->|"2. Authenticates (JWT)"| cognito
+    
+    %% PARSE FLOW (Outside VPC)
+    user ==>|"3. Parse raw text (Bearer JWT)\n[parse path]"| agenda_url
+    agenda_url --> agenda_lambda
+    agenda_lambda ==>|"4. Converse / Messages (tool: record_agenda)"| bedrock
+    bedrock -->|"5. Structured agenda JSON"| agenda_lambda
+    agenda_lambda ==>|"6. Pre-filled agenda proposal"| user
+
+    %% SAVE FLOW (Inside VPC)
+    user ==>|"7. Save checked agenda + ai_suggestion\nPOST /api/v1/meetings/{id}/agenda\n[save path]"| api_url
+    api_url --> api_lambda
+    api_lambda ==>|"8. Validated INSERT / UPDATE"| aurora
+
+    classDef outside fill:#f3e8ff,stroke:#9333ea,stroke-width:2px;
+    classDef inside fill:#e0f2fe,stroke:#0284c7,stroke-width:2px;
+    classDef storage fill:#fef3c7,stroke:#d97706,stroke-width:2px;
+    classDef external fill:#f1f5f9,stroke:#64748b,stroke-width:2px;
+
+    class agenda_lambda,agenda_url,frontend,cognito outside;
+    class api_lambda,api_url inside;
+    class aurora storage;
+    class bedrock external;
+```

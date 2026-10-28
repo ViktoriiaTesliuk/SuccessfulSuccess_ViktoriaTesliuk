@@ -1,0 +1,165 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Lab 6: LLM Agenda Parser service (as.yml).
+  Lambda function outside the VPC with Amazon Bedrock permissions and a public Lambda Function URL.
+  Accepts raw agenda text from the browser, parses it using Claude on Amazon Bedrock,
+  and returns a structured agenda JSON without touching the database.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: successfulsuccess
+    Description: Prefix for resource names.
+
+  ImageUri:
+    Type: String
+    Description: Container image URI containing the backend and agenda parser.
+
+  Architecture:
+    Type: String
+    Default: arm64
+    AllowedValues: [x86_64, arm64]
+    Description: Target Lambda architecture.
+
+  AppTimezone:
+    Type: String
+    Default: Europe/Kyiv
+    Description: Application timezone.
+
+  CorsOrigins:
+    Type: String
+    Default: "*"
+    Description: Comma-separated origins allowed to call the agenda parser URL.
+
+  CognitoUserPoolId:
+    Type: String
+    Description: Cognito user pool ID for verifying access/ID tokens.
+
+  CognitoClientId:
+    Type: String
+    Description: Cognito App Client ID.
+
+  ParserModel:
+    Type: String
+    Default: us.anthropic.claude-haiku-4-5-20251001-v1:0
+    Description: Bedrock Claude model ID used for agenda parsing.
+
+Resources:
+  # =========================================================================
+  # IAM Execution Role for Agenda Parser Lambda
+  # =========================================================================
+  AgendaParserRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-agenda-parser-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockInferenceAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  - bedrock:GetFoundationModelAvailability
+                  - bedrock-mantle:CreateInference
+                Resource: "*"
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  # =========================================================================
+  # CloudWatch Log Group
+  # =========================================================================
+  AgendaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-agenda-parser"
+      RetentionInDays: 7
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  # =========================================================================
+  # Lambda Function (Outside VPC, No NAT required)
+  # =========================================================================
+  AgendaParserFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-agenda-parser"
+      PackageType: Image
+      Code:
+        ImageUri: !Ref ImageUri
+      ImageConfig:
+        Command:
+          - "app.ai.agenda_lambda.handler"
+      Architectures:
+        - !Ref Architecture
+      Role: !GetAtt AgendaParserRole.Arn
+      MemorySize: 512
+      Timeout: 30
+      LoggingConfig:
+        LogGroup: !Ref AgendaLogGroup
+      Environment:
+        Variables:
+          COGNITO_REGION: !Ref AWS::Region
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          PARSER_MODEL: !Ref ParserModel
+          APP_TIMEZONE: !Ref AppTimezone
+          LOG_LEVEL: INFO
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  # =========================================================================
+  # Lambda Function URL (Public HTTPS endpoint, verified via Cognito in app)
+  # =========================================================================
+  AgendaParserUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt AgendaParserFunction.Arn
+      AuthType: NONE
+      InvokeMode: BUFFERED
+      Cors:
+        AllowOrigins: !Split [",", !Ref CorsOrigins]
+        AllowMethods:
+          - POST
+        AllowHeaders:
+          - authorization
+          - content-type
+        MaxAge: 300
+
+  FunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AgendaParserFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  FunctionUrlInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AgendaParserFunction
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+Outputs:
+  AgendaParserUrl:
+    Description: Base URL of the agenda parser (Lambda Function URL)
+    Value: !GetAtt AgendaParserUrl.FunctionUrl
+  FunctionName:
+    Value: !Ref AgendaParserFunction
+  LogGroupName:
+    Value: !Ref AgendaLogGroup

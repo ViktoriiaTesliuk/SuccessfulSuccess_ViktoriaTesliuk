@@ -1,7 +1,8 @@
 """Pydantic request/response models for the meetings API."""
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
+from typing import Any
 
 from pydantic import (
     BaseModel,
@@ -16,6 +17,30 @@ from pydantic import (
 from app.config import settings
 
 MAX_PARTICIPANTS = 50
+
+
+class AgendaItemSchema(BaseModel):
+    topic: str = Field(min_length=1)
+    owner: str | None = None
+    minutes: int | None = Field(default=None, ge=1, le=480)
+
+
+class ActionItemSchema(BaseModel):
+    task: str = Field(min_length=1)
+    owner: str | None = None
+    due: date | None = None
+
+
+class AiSuggestionPayload(BaseModel):
+    suggestion: dict[str, Any] | None = None
+    model: str | None = None
+    prompt_version: str | None = None
+
+
+class AgendaSave(BaseModel):
+    items: list[AgendaItemSchema]
+    action_items: list[ActionItemSchema] = Field(default_factory=list)
+    ai_suggestion: AiSuggestionPayload | None = None
 
 
 class ParticipantCreate(BaseModel):
@@ -103,6 +128,8 @@ class MeetingRead(BaseModel):
     starts_at: datetime
     ends_at: datetime
     participants: list[ParticipantRead]
+    agenda: dict[str, Any] | None = None
+    ai_suggestion: dict[str, Any] | None = None
     created_at: datetime
     updated_at: datetime
 

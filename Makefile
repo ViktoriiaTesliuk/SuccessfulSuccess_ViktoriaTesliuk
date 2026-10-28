@@ -40,6 +40,7 @@ APP_STACK ?= $(PROJECT_NAME)-backend
 ECR_STACK ?= $(PROJECT_NAME)-ecr
 FRONTEND_STACK ?= $(PROJECT_NAME)-frontend
 REPORTS_STACK ?= $(PROJECT_NAME)-reports
+AGENDA_STACK ?= $(PROJECT_NAME)-agenda
 IMAGE_TAG ?= latest
 # x86_64 or arm64. arm64 is ~20% cheaper on Lambda and builds natively on
 # Apple Silicon; the image platform is derived from it so the two cannot drift.
@@ -146,6 +147,36 @@ shell-backend: ## Open a shell in the backend container
 
 psql: ## Open psql against the application database
 	$(COMPOSE) exec db psql -U app -d meetings
+
+llm-hello: ## Test Bedrock Anthropic model invocation from laptop (Lab 6)
+	@PYTHONPATH=backend python3 -c '\
+	from app.ai.agenda import get_anthropic_client; \
+	from app.config import settings; \
+	client = get_anthropic_client(); \
+	msg = client.messages.create( \
+		model=settings.parser_model, \
+		max_tokens=1024, \
+		messages=[{"role": "user", "content": "In one sentence: what is an ISO week?"}], \
+		extra_body={"anthropic_version": "bedrock-2023-05-31"}, \
+	); \
+	print(next(b.text for b in msg.content if b.type == "text")); \
+	print("stop_reason:", msg.stop_reason); \
+	print("usage: input_tokens=", msg.usage.input_tokens, "output_tokens=", msg.usage.output_tokens); \
+	'
+
+parse: ## Parse an agenda text with LLM: make parse TEXT="..." [MODEL=...]
+	@test -n "$(TEXT)" || { echo "Usage: make parse TEXT=\"<agenda text>\" [MODEL=...]"; exit 1; }
+	@PYTHONPATH=backend python3 -c '\
+	import json, sys; \
+	from datetime import date; \
+	from app.ai.agenda import parse_agenda, cost_usd; \
+	from app.config import settings; \
+	text = sys.argv[1]; \
+	model = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else settings.parser_model; \
+	agenda, usage = parse_agenda(text, date.today(), settings.app_timezone, model=model); \
+	print(json.dumps(agenda.model_dump(mode="json"), indent=2, ensure_ascii=False)); \
+	print(f"Usage: {usage} | Cost: $${cost_usd(model, usage):.6f} | Model: {model}"); \
+	' "$(TEXT)" "$(MODEL)"
 
 aws-whoami: ## Verify the AWS credentials in .env
 	$(require-aws-credentials)
@@ -314,6 +345,7 @@ aws-deploy-frontend: ## Deploy the frontend to S3 + CloudFront, built against th
 	@# Now that the site's URL exists, let Cognito redirect back to it.
 	@$(MAKE) --no-print-directory aws-deploy-auth
 	@api=$$($(call stack-output,$(APP_STACK),ApiUrl) | tr -d '[:space:]'); \
+		parser_url=$$($(call stack-output,$(AGENDA_STACK),AgendaParserUrl) 2>/dev/null | tr -d '[:space:]'); \
 		auth=$$($(call stack-outputs,$(AUTH_STACK)) | tr -d '\r'); \
 		auth_out() { printf '%s\n' "$$auth" | awk -F '\t' -v k="$$1" '$$1 == k { print $$2 }'; }; \
 		bucket=$$($(call stack-output,$(FRONTEND_STACK),BucketName) | tr -d '[:space:]'); \
@@ -322,6 +354,7 @@ aws-deploy-frontend: ## Deploy the frontend to S3 + CloudFront, built against th
 		rm -rf frontend/out; \
 		docker build --target export --output type=local,dest=frontend/out \
 			--build-arg NEXT_PUBLIC_API_BASE_URL="$$api" \
+			--build-arg NEXT_PUBLIC_AGENDA_PARSER_URL="$$parser_url" \
 			--build-arg NEXT_PUBLIC_COGNITO_USER_POOL_ID="$$(auth_out UserPoolId)" \
 			--build-arg NEXT_PUBLIC_COGNITO_CLIENT_ID="$$(auth_out UserPoolClientId)" \
 			--build-arg NEXT_PUBLIC_COGNITO_DOMAIN="$$(auth_out HostedDomain)" \
@@ -410,11 +443,47 @@ aws-reports-status: ## Show outputs of the reports stack
 	@$(AWS) cloudformation describe-stacks --stack-name $(REPORTS_STACK) \
 		--query 'Stacks[0].Outputs' --output table
 
+aws-deploy-agenda: aws-push ## Deploy the LLM agenda parser stack (infra/as.yml)
+	$(require-aws-credentials)
+	@repo=$$($(call stack-output,$(ECR_STACK),RepositoryUri) | tr -d '[:space:]'); \
+		digest=$$($(AWS) ecr describe-images --repository-name "$${repo#*/}" --image-ids imageTag=$(IMAGE_TAG) --query 'imageDetails[0].imageDigest' --output text | tr -d '[:space:]'); \
+		auth_out() { $(call stack-output,$(AUTH_STACK),$$1) | tr -d '[:space:]'; }; \
+		pool="$$(auth_out UserPoolId)"; \
+		client="$$(auth_out UserPoolClientId)"; \
+		allowed=$$($(call stack-output,$(FRONTEND_STACK),AllowedOrigins) 2>/dev/null | tr -d '[:space:]'); \
+		origins="$${AWS_CORS_ORIGINS:-$${allowed:-*}}"; \
+		model="$${PARSER_MODEL:-us.anthropic.claude-haiku-4-5-20251001-v1:0}"; \
+		echo "Deploying agenda parser stack with model=$$model origins=$$origins"; \
+		$(call wait-stack-idle,$(AGENDA_STACK)); \
+		$(call clear-failed-create,$(AGENDA_STACK)); \
+		$(AWS) cloudformation deploy \
+			--stack-name $(AGENDA_STACK) \
+			--template-file infra/as.yml \
+			--capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+			--no-fail-on-empty-changeset \
+			$(STACK_TAGS) \
+			--parameter-overrides \
+				"ProjectName=$(PROJECT_NAME)" \
+				ImageUri="$$repo@$$digest" \
+				"Architecture=$(AWS_LAMBDA_ARCH)" \
+				"AppTimezone=$(APP_TIMEZONE)" \
+				"CorsOrigins=$$origins" \
+				"CognitoUserPoolId=$$pool" \
+				"CognitoClientId=$$client" \
+				"ParserModel=$$model"
+	@$(MAKE) --no-print-directory aws-agenda-status
+
+aws-agenda-status: ## Show outputs of the agenda parser stack
+	@$(AWS) cloudformation describe-stacks --stack-name $(AGENDA_STACK) \
+		--query 'Stacks[0].Outputs' --output table
+
 aws-destroy: ## Delete every stack, including the database and its data
 	$(require-aws-credentials)
-	@printf 'Delete %s, %s, %s, %s and %s? The Aurora cluster and all its data, and every user account, go with them (no snapshot). Type yes: ' \
-		"$(REPORTS_STACK)" "$(FRONTEND_STACK)" "$(APP_STACK)" "$(AUTH_STACK)" "$(ECR_STACK)"; \
+	@printf 'Delete %s, %s, %s, %s, %s and %s? The Aurora cluster and all its data, and every user account, go with them (no snapshot). Type yes: ' \
+		"$(AGENDA_STACK)" "$(REPORTS_STACK)" "$(FRONTEND_STACK)" "$(APP_STACK)" "$(AUTH_STACK)" "$(ECR_STACK)"; \
 		read answer; test "$$answer" = "yes" || { echo "Aborted."; exit 1; }
+	-$(AWS) cloudformation delete-stack --stack-name $(AGENDA_STACK)
+	-$(AWS) cloudformation wait stack-delete-complete --stack-name $(AGENDA_STACK)
 	@rep_bucket=$$($(call stack-output,$(REPORTS_STACK),ReportsBucketName) 2>/dev/null | tr -d '[:space:]'); \
 		if [ -n "$$rep_bucket" ] && [ "$$rep_bucket" != "None" ]; then \
 			echo "Emptying s3://$$rep_bucket"; \

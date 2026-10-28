@@ -1,0 +1,31 @@
+@startuml C4_Containers_Lab6
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+Person(user, "User", "A team member managing their daily meetings.")
+
+System_Boundary(c1, "SuccessfulSuccess System") {
+    Container(spa, "Single-Page Application", "Next.js, TypeScript", "Delivers the Canva-styled UI to the browser via CloudFront and S3.")
+    Container(cognito, "Amazon Cognito", "AWS Cognito", "Manages user authentication and JWT tokens.")
+
+    Container(agenda_parser, "Agenda Parser Lambda", "Python 3.12, Anthropic SDK", "Parses raw text outside the VPC with no database access. Public Function URL.", $tags="outside_vpc")
+
+    Container(backend_api, "Backend API Lambda", "FastAPI, Python 3.12", "Handles CRUD operations, business logic, and database access inside the VPC.", $tags="inside_vpc")
+    ContainerDb(db, "Relational Database", "Aurora PostgreSQL Serverless v2", "Stores meetings, participants, users, agendas, and ai_suggestions.", $tags="inside_vpc")
+}
+
+System_Ext(bedrock, "Amazon Bedrock", "Anthropic Claude (Haiku / Opus) foundation model via Messages / Converse API.")
+
+Rel(user, spa, "Uses", "HTTPS")
+Rel(user, cognito, "Authenticates", "HTTPS")
+
+' Parse Flow
+Rel(user, agenda_parser, "1. Parse raw agenda text [parse]", "HTTPS / Lambda URL (Bearer JWT)")
+Rel(agenda_parser, bedrock, "2. Calls record_agenda tool", "AWS IAM / SigV4")
+Rel(bedrock, agenda_parser, "3. Tool call with validated agenda JSON", "HTTPS")
+Rel(agenda_parser, user, "4. Returns pre-filled agenda JSON", "JSON")
+
+' Save Flow
+Rel(user, backend_api, "5. Save checked form + ai_suggestion [save]", "HTTPS / POST /meetings/{id}/agenda")
+Rel(backend_api, db, "6. Writes validated agenda to database", "SQL / asyncpg:5432")
+
+@enduml

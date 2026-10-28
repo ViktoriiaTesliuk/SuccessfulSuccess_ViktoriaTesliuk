@@ -5,6 +5,7 @@ import { CalendarDays, Clock, Mail, MapPin, Pencil, Trash2, Users } from "lucide
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
+import { MeetingAgendaSection } from "@/components/meeting-agenda-section"
 import {
   Dialog,
   DialogContent,
@@ -118,6 +119,10 @@ export function MeetingDetailsDialog({
               </ul>
             )}
           </section>
+
+          <Separator />
+
+          <MeetingAgendaSection meeting={meeting} />
 
           <DialogFooter>
             <Button variant="destructive" onClick={() => onDelete(meeting)}>
