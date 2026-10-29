@@ -30,13 +30,13 @@ The backend applies migrations on start.
 
 Every page except the login page, and every `/api/v1` endpoint, needs a
 signed-in user, and each user sees only their own meetings. Sign-in is an AWS
-Cognito user pool (`infra/auth.yml`): email + password, and Google when it is
+Cognito user pool managed via Terraform in `infra/auth.tf`: email + password, and Google when it is
 configured. Even for local development the pool lives in AWS (it is free at
 this scale):
 
 ```bash
-make aws-deploy-auth   # create/update the user pool; allows http://localhost:$FRONTEND_PORT/
-make aws-auth-env      # prints COGNITO_* lines: paste them into .env
+make infra-plan        # preview infrastructure changes in HCP Terraform
+make aws-auth-env      # prints COGNITO_* lines via terraform output: paste them into .env
 docker compose up -d   # restart so the API and the frontend pick them up
 ```
 
@@ -359,7 +359,8 @@ sent, so every client shows the same time as the day it was listed under.
 ```
 backend/    FastAPI app (api → services → repositories → models), Alembic, tests
 frontend/   Next.js app, shadcn/ui primitives in components/ui
-infra/      CloudFormation templates behind the aws-* targets
+infra/      Terraform HCL configuration (HCP Terraform workspace) & remaining CloudFormation templates
+docs/adr/   Architecture Decision Records (e.g. 0007-terraform.md)
 docker-compose.yml
 ```
 

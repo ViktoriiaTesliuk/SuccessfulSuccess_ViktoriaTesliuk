@@ -35,12 +35,13 @@ AWS ?= docker run --rm \
 	-v "$(CURDIR)":/aws -w /aws \
 	amazon/aws-cli:latest
 
-AUTH_STACK ?= $(PROJECT_NAME)-auth
+export PATH := /opt/homebrew/bin:/usr/local/bin:$(PATH)
+TF ?= terraform -chdir=infra
+tf-output = $(shell $(TF) output -raw $(1) 2>/dev/null)
+
 APP_STACK ?= $(PROJECT_NAME)-backend
 ECR_STACK ?= $(PROJECT_NAME)-ecr
 FRONTEND_STACK ?= $(PROJECT_NAME)-frontend
-REPORTS_STACK ?= $(PROJECT_NAME)-reports
-AGENDA_STACK ?= $(PROJECT_NAME)-agenda
 IMAGE_TAG ?= latest
 # x86_64 or arm64. arm64 is ~20% cheaper on Lambda and builds natively on
 # Apple Silicon; the image platform is derived from it so the two cannot drift.
@@ -95,8 +96,8 @@ define require-db-password
 endef
 
 .PHONY: help up up-build down down-v logs ps migrate revision seed test lint fmt shell-backend psql \
-        aws-whoami aws-deploy aws-deploy-auth aws-auth-env aws-ecr aws-push aws-deploy-backend aws-migrate aws-url aws-status aws-logs \
-        aws-frontend-cert aws-deploy-frontend aws-frontend-url aws-destroy
+        infra-plan aws-whoami aws-deploy aws-deploy-auth aws-auth-env aws-ecr aws-push aws-deploy-backend aws-migrate aws-url aws-status aws-logs \
+        aws-frontend-cert aws-deploy-frontend aws-frontend-url aws-deploy-reports report-now aws-reports-status aws-deploy-agenda aws-agenda-status aws-destroy
 
 help:
 	@grep -hE '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -178,46 +179,24 @@ parse: ## Parse an agenda text with LLM: make parse TEXT="..." [MODEL=...]
 	print(f"Usage: {usage} | Cost: $${cost_usd(model, usage):.6f} | Model: {model}"); \
 	' "$(TEXT)" "$(MODEL)"
 
+infra-plan: ## Run terraform plan against HCP Terraform workspace
+	@$(TF) plan
+
 aws-whoami: ## Verify the AWS credentials in .env
 	$(require-aws-credentials)
 	$(AWS) sts get-caller-identity
 
-aws-deploy: ## Deploy everything: sign-in, then the backend, then the frontend built against both
-	@$(MAKE) --no-print-directory aws-deploy-auth
+aws-deploy: ## Deploy the backend, then the frontend (infrastructure managed via HCP Terraform)
 	@$(MAKE) --no-print-directory aws-deploy-backend
 	@$(MAKE) --no-print-directory aws-deploy-frontend
 
-aws-deploy-auth: ## Create/update the Cognito user pool (email + password; Google when GOOGLE_CLIENT_ID is set)
-	$(require-aws-credentials)
-	@urls="http://localhost:$(or $(FRONTEND_PORT),3000)/"; \
-		site=$$($(call stack-output,$(FRONTEND_STACK),AllowedOrigins) 2>/dev/null | tr -d '[:space:]'); \
-		case "$$site" in ""|None) ;; *) urls="$$urls,$$(echo "$$site" | sed 's|,|/,|g')/" ;; esac; \
-		echo "Sign-in redirect URLs: $$urls"; \
-		test -n "$(GOOGLE_CLIENT_ID)" || echo "GOOGLE_CLIENT_ID is empty — Google sign-in stays off"; \
-		$(call wait-stack-idle,$(AUTH_STACK)); \
-		$(call clear-failed-create,$(AUTH_STACK)); \
-		$(AWS) cloudformation deploy \
-			--stack-name $(AUTH_STACK) \
-			--template-file infra/auth.yml \
-			--no-fail-on-empty-changeset \
-			$(STACK_TAGS) \
-			--parameter-overrides \
-				"ProjectName=$(PROJECT_NAME)" \
-				"AppUrls=$$urls" \
-				"GoogleClientId=$(GOOGLE_CLIENT_ID)" \
-				"GoogleClientSecret=$(GOOGLE_CLIENT_SECRET)"
-	@if [ -n "$(GOOGLE_CLIENT_ID)" ]; then \
-		echo "Google Cloud console → the OAuth client → Authorized redirect URIs must include:"; \
-		echo "  $$($(call stack-output,$(AUTH_STACK),GoogleRedirectUri) | tr -d '[:space:]')"; \
-	fi
-	@$(MAKE) --no-print-directory aws-auth-env
+aws-deploy-auth: infra-plan ## Auth is managed via Terraform in infra/ (previews changes)
 
 aws-auth-env: ## Print the Cognito settings to put in .env for local development
-	@$(call stack-outputs,$(AUTH_STACK)) | awk -F '\t' ' \
-		$$1 == "UserPoolId" { print "COGNITO_USER_POOL_ID=" $$2 } \
-		$$1 == "UserPoolClientId" { print "COGNITO_CLIENT_ID=" $$2 } \
-		$$1 == "HostedDomain" { print "COGNITO_DOMAIN=" $$2 } \
-		$$1 == "GoogleEnabled" { print "COGNITO_GOOGLE_ENABLED=" $$2 }' | tr -d '\r'
+	@echo "COGNITO_USER_POOL_ID=$(call tf-output,UserPoolId)"
+	@echo "COGNITO_CLIENT_ID=$(call tf-output,UserPoolClientId)"
+	@echo "COGNITO_DOMAIN=$(call tf-output,HostedDomain)"
+	@echo "COGNITO_GOOGLE_ENABLED=$(call tf-output,GoogleEnabled)"
 
 aws-ecr: ## Create the ECR repository for the backend image
 	$(require-aws-credentials)
@@ -240,10 +219,10 @@ aws-push: aws-ecr ## Build the backend Lambda image and push it to ECR
 aws-deploy-backend: aws-push ## Deploy the backend to AWS (Lambda function URL + Aurora Serverless), then migrate
 	$(require-aws-credentials)
 	$(require-db-password)
-	@pool=$$($(call stack-output,$(AUTH_STACK),UserPoolId) 2>/dev/null | tr -d '[:space:]'); \
-		client=$$($(call stack-output,$(AUTH_STACK),UserPoolClientId) | tr -d '[:space:]'); \
-		issuer=$$($(call stack-output,$(AUTH_STACK),Issuer) | tr -d '[:space:]'); \
-		case "$$pool" in ""|None) echo "No user pool found — run: make aws-deploy-auth"; exit 1 ;; esac; \
+	@pool="$(call tf-output,UserPoolId)"; \
+		client="$(call tf-output,UserPoolClientId)"; \
+		issuer="$(call tf-output,Issuer)"; \
+		case "$$pool" in ""|None) echo "No user pool found — run: make infra-plan"; exit 1 ;; esac; \
 		jwks=$$(curl -fsS "$$issuer/.well-known/jwks.json" | base64 | tr -d '\n'); \
 		test -n "$$jwks" || { echo "Could not download $$issuer/.well-known/jwks.json"; exit 1; }; \
 		vpc=$$($(AWS) ec2 describe-vpcs --filters Name=isDefault,Values=true \
@@ -342,12 +321,12 @@ aws-deploy-frontend: ## Deploy the frontend to S3 + CloudFront, built against th
 				"ProjectName=$(PROJECT_NAME)" \
 				"PricingPlan=$(or $(AWS_CLOUDFRONT_PLAN),FREE)" \
 				$$domain
-	@# Now that the site's URL exists, let Cognito redirect back to it.
-	@$(MAKE) --no-print-directory aws-deploy-auth
 	@api=$$($(call stack-output,$(APP_STACK),ApiUrl) | tr -d '[:space:]'); \
-		parser_url=$$($(call stack-output,$(AGENDA_STACK),AgendaParserUrl) 2>/dev/null | tr -d '[:space:]'); \
-		auth=$$($(call stack-outputs,$(AUTH_STACK)) | tr -d '\r'); \
-		auth_out() { printf '%s\n' "$$auth" | awk -F '\t' -v k="$$1" '$$1 == k { print $$2 }'; }; \
+		parser_url="$(call tf-output,AgendaParserUrl)"; \
+		pool="$(call tf-output,UserPoolId)"; \
+		client="$(call tf-output,UserPoolClientId)"; \
+		domain="$(call tf-output,HostedDomain)"; \
+		google_enabled="$(call tf-output,GoogleEnabled)"; \
 		bucket=$$($(call stack-output,$(FRONTEND_STACK),BucketName) | tr -d '[:space:]'); \
 		dist=$$($(call stack-output,$(FRONTEND_STACK),DistributionId) | tr -d '[:space:]'); \
 		echo "Building the static export against $$api"; \
@@ -355,10 +334,10 @@ aws-deploy-frontend: ## Deploy the frontend to S3 + CloudFront, built against th
 		docker build --target export --output type=local,dest=frontend/out \
 			--build-arg NEXT_PUBLIC_API_BASE_URL="$$api" \
 			--build-arg NEXT_PUBLIC_AGENDA_PARSER_URL="$$parser_url" \
-			--build-arg NEXT_PUBLIC_COGNITO_USER_POOL_ID="$$(auth_out UserPoolId)" \
-			--build-arg NEXT_PUBLIC_COGNITO_CLIENT_ID="$$(auth_out UserPoolClientId)" \
-			--build-arg NEXT_PUBLIC_COGNITO_DOMAIN="$$(auth_out HostedDomain)" \
-			--build-arg NEXT_PUBLIC_COGNITO_GOOGLE_ENABLED="$$(auth_out GoogleEnabled)" \
+			--build-arg NEXT_PUBLIC_COGNITO_USER_POOL_ID="$$pool" \
+			--build-arg NEXT_PUBLIC_COGNITO_CLIENT_ID="$$client" \
+			--build-arg NEXT_PUBLIC_COGNITO_DOMAIN="$$domain" \
+			--build-arg NEXT_PUBLIC_COGNITO_GOOGLE_ENABLED="$$google_enabled" \
 			./frontend || exit 1; \
 		echo "Uploading to s3://$$bucket"; \
 		$(AWS) s3 sync frontend/out "s3://$$bucket" --delete --exclude "*.html" \
@@ -388,48 +367,13 @@ aws-verify-email: ## Verify an email address in SES: make aws-verify-email EMAIL
 	$(AWS) sesv2 create-email-identity --email-identity "$(EMAIL)"
 	@echo "Verification email sent to $(EMAIL). Please check your inbox and click the verification link."
 
-aws-deploy-reports: aws-push ## Deploy the event-driven weekly reports stack (S3 + SQS + Builder + Mailer + Scheduler)
-	$(require-aws-credentials)
-	@fn=$$($(call stack-output,$(APP_STACK),FunctionName) 2>/dev/null | tr -d '[:space:]'); \
-		test -n "$$fn" -a "$$fn" != "None" || { \
-			echo "Backend stack not found. Run make aws-deploy-backend first."; exit 1; }; \
-		vpc=$$($(AWS) lambda get-function-configuration --function-name "$$fn" --query 'VpcConfig.VpcId' --output text | tr -d '[:space:]'); \
-		subnets=$$($(AWS) lambda get-function-configuration --function-name "$$fn" --query 'VpcConfig.SubnetIds[]' --output text | tr '[:space:]' ',' | sed 's/,*$$//'); \
-		sg=$$($(AWS) lambda get-function-configuration --function-name "$$fn" --query 'VpcConfig.SecurityGroupIds[0]' --output text | tr -d '[:space:]'); \
-		dburl=$$($(AWS) lambda get-function-configuration --function-name "$$fn" --query 'Environment.Variables.DATABASE_URL' --output text | tr -d '[:space:]'); \
-		repo=$$($(call stack-output,$(ECR_STACK),RepositoryUri) | tr -d '[:space:]'); \
-		digest=$$($(AWS) ecr describe-images --repository-name "$${repo#*/}" --image-ids imageTag=$(IMAGE_TAG) --query 'imageDetails[0].imageDigest' --output text | tr -d '[:space:]'); \
-		routetables=$$($(AWS) ec2 describe-route-tables --filters Name=vpc-id,Values=$$vpc --query 'RouteTables[].RouteTableId' --output text | tr '[:space:]' ',' | sed 's/,*$$//'); \
-		sender="$(or $(AWS_REPORT_SENDER),$(AWS_REPORT_RECIPIENT))"; \
-		recipient="$(AWS_REPORT_RECIPIENT)"; \
-		test -n "$$recipient" || { echo "Please set AWS_REPORT_RECIPIENT in .env (e.g. AWS_REPORT_RECIPIENT=your-email@example.com)"; exit 1; }; \
-		echo "Deploying reports stack with sender=$$sender recipient=$$recipient vpc=$$vpc"; \
-		$(call wait-stack-idle,$(REPORTS_STACK)); \
-		$(call clear-failed-create,$(REPORTS_STACK)); \
-		$(AWS) cloudformation deploy \
-			--stack-name $(REPORTS_STACK) \
-			--template-file infra/reports.yml \
-			--capabilities CAPABILITY_IAM \
-			--no-fail-on-empty-changeset \
-			$(STACK_TAGS) \
-			--parameter-overrides \
-				"ProjectName=$(PROJECT_NAME)" \
-				"VpcId=$$vpc" \
-				"SubnetIds=$$subnets" \
-				"RouteTableIds=$$routetables" \
-				"FunctionSecurityGroupId=$$sg" \
-				"DatabaseUrl=$$dburl" \
-				ImageUri="$$repo@$$digest" \
-				"Architecture=$(AWS_LAMBDA_ARCH)" \
-				"AppTimezone=$(APP_TIMEZONE)" \
-				"SenderEmail=$$sender" \
-				"RecipientEmail=$$recipient"
+aws-deploy-reports: infra-plan ## Reports infrastructure is managed via Terraform in infra/ (previews changes)
 
 report-now: ## Trigger on-demand weekly report: make report-now [WEEK=2026-W39]
 	$(require-aws-credentials)
-	@q=$$($(call stack-output,$(REPORTS_STACK),QueueUrl) 2>/dev/null | tr -d '[:space:]'); \
+	@q="$(call tf-output,QueueUrl)"; \
 		test -n "$$q" -a "$$q" != "None" || { \
-			echo "Reports stack not found — run: make aws-deploy-reports"; exit 1; }; \
+			echo "Reports queue not found — run: make infra-plan"; exit 1; }; \
 		week="$(WEEK)"; \
 		if [ -n "$$week" ]; then \
 			payload="{\"week\": \"$$week\", \"source\": \"sqs\"}"; \
@@ -439,57 +383,30 @@ report-now: ## Trigger on-demand weekly report: make report-now [WEEK=2026-W39]
 		echo "Sending SQS message to $$q: $$payload"; \
 		$(AWS) sqs send-message --queue-url "$$q" --message-body "$$payload" --output json
 
-aws-reports-status: ## Show outputs of the reports stack
-	@$(AWS) cloudformation describe-stacks --stack-name $(REPORTS_STACK) \
-		--query 'Stacks[0].Outputs' --output table
+aws-reports-status: ## Show outputs of the reports stack from Terraform
+	@echo "QueueUrl: $(call tf-output,QueueUrl)"
+	@echo "QueueArn: $(call tf-output,QueueArn)"
+	@echo "DlqUrl: $(call tf-output,DlqUrl)"
+	@echo "DlqArn: $(call tf-output,DlqArn)"
+	@echo "ReportsBucketName: $(call tf-output,ReportsBucketName)"
+	@echo "ReportsBucketArn: $(call tf-output,ReportsBucketArn)"
+	@echo "BuilderFunctionName: $(call tf-output,BuilderFunctionName)"
+	@echo "MailerFunctionName: $(call tf-output,MailerFunctionName)"
+	@echo "ScheduleName: $(call tf-output,ScheduleName)"
 
-aws-deploy-agenda: aws-push ## Deploy the LLM agenda parser stack (infra/as.yml)
-	$(require-aws-credentials)
-	@repo=$$($(call stack-output,$(ECR_STACK),RepositoryUri) | tr -d '[:space:]'); \
-		digest=$$($(AWS) ecr describe-images --repository-name "$${repo#*/}" --image-ids imageTag=$(IMAGE_TAG) --query 'imageDetails[0].imageDigest' --output text | tr -d '[:space:]'); \
-		pool=$$($(call stack-output,$(AUTH_STACK),UserPoolId) 2>/dev/null | tr -d '[:space:]'); \
-		client=$$($(call stack-output,$(AUTH_STACK),UserPoolClientId) 2>/dev/null | tr -d '[:space:]'); \
-		allowed=$$($(call stack-output,$(FRONTEND_STACK),AllowedOrigins) 2>/dev/null | tr -d '[:space:]'); \
-		origins="$${AWS_CORS_ORIGINS:-$${allowed:-*}}"; \
-		model="$${PARSER_MODEL:-us.anthropic.claude-haiku-4-5-20251001-v1:0}"; \
-		echo "Deploying agenda parser stack with model=$$model origins=$$origins"; \
-		$(call wait-stack-idle,$(AGENDA_STACK)); \
-		$(call clear-failed-create,$(AGENDA_STACK)); \
-		$(AWS) cloudformation deploy \
-			--stack-name $(AGENDA_STACK) \
-			--template-file infra/as.yml \
-			--capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
-			--no-fail-on-empty-changeset \
-			$(STACK_TAGS) \
-			--parameter-overrides \
-				"ProjectName=$(PROJECT_NAME)" \
-				ImageUri="$$repo@$$digest" \
-				"Architecture=$(AWS_LAMBDA_ARCH)" \
-				"AppTimezone=$(APP_TIMEZONE)" \
-				"CorsOrigins=$$origins" \
-				"CognitoUserPoolId=$$pool" \
-				"CognitoClientId=$$client" \
-				"ParserModel=$$model"
-	@$(MAKE) --no-print-directory aws-agenda-status
+aws-deploy-agenda: infra-plan ## Agenda parser infrastructure is managed via Terraform in infra/ (previews changes)
 
-aws-agenda-status: ## Show outputs of the agenda parser stack
-	@$(AWS) cloudformation describe-stacks --stack-name $(AGENDA_STACK) \
-		--query 'Stacks[0].Outputs' --output table
+aws-agenda-status: ## Show outputs of the agenda parser stack from Terraform
+	@echo "AgendaParserUrl: $(call tf-output,AgendaParserUrl)"
+	@echo "AgendaParserFunctionName: $(call tf-output,AgendaParserFunctionName)"
+	@echo "AgendaLogGroupName: $(call tf-output,AgendaLogGroupName)"
 
 aws-destroy: ## Delete every stack, including the database and its data
 	$(require-aws-credentials)
-	@printf 'Delete %s, %s, %s, %s, %s and %s? The Aurora cluster and all its data, and every user account, go with them (no snapshot). Type yes: ' \
-		"$(AGENDA_STACK)" "$(REPORTS_STACK)" "$(FRONTEND_STACK)" "$(APP_STACK)" "$(AUTH_STACK)" "$(ECR_STACK)"; \
+	@echo "Note: Auth, Reports, and Agenda AI resources are now managed by Terraform in HCP Terraform."
+	@printf 'Delete %s, %s and %s? The Aurora cluster and all its data go with them (no snapshot). Type yes: ' \
+		"$(FRONTEND_STACK)" "$(APP_STACK)" "$(ECR_STACK)"; \
 		read answer; test "$$answer" = "yes" || { echo "Aborted."; exit 1; }
-	-$(AWS) cloudformation delete-stack --stack-name $(AGENDA_STACK)
-	-$(AWS) cloudformation wait stack-delete-complete --stack-name $(AGENDA_STACK)
-	@rep_bucket=$$($(call stack-output,$(REPORTS_STACK),ReportsBucketName) 2>/dev/null | tr -d '[:space:]'); \
-		if [ -n "$$rep_bucket" ] && [ "$$rep_bucket" != "None" ]; then \
-			echo "Emptying s3://$$rep_bucket"; \
-			$(AWS) s3 rm "s3://$$rep_bucket" --recursive --only-show-errors || true; \
-		fi
-	-$(AWS) cloudformation delete-stack --stack-name $(REPORTS_STACK)
-	-$(AWS) cloudformation wait stack-delete-complete --stack-name $(REPORTS_STACK)
 	@bucket=$$($(call stack-output,$(FRONTEND_STACK),BucketName) 2>/dev/null | tr -d '[:space:]'); \
 		if [ -n "$$bucket" ] && [ "$$bucket" != "None" ]; then \
 			echo "Emptying s3://$$bucket"; \
