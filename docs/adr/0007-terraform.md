@@ -82,7 +82,31 @@ As documented in the lab guidelines, ephemeral authorization permissions (`aws_l
 
 ---
 
-## 4. Consequences and Operational Notes
+## 4. Operational Considerations & Key Architectural Questions
+
+### 4.1 Why Terraform and not CloudFormation, CDK, or OpenTofu for this project?
+- **Versus CloudFormation:** CloudFormation is tied strictly to AWS and cannot manage non-AWS resources like the Google Cloud OAuth client, GitHub repository rules, or multi-cloud assets. Furthermore, CloudFormation creates circular dependencies (e.g., S3 bucket notifications and Lambda permissions) and lacks interactive speculative plans (`terraform plan`).
+- **Versus AWS CDK:** CDK is a code generator that synthesizes CloudFormation templates under the hood, inheriting all of CloudFormation's deployment-time limitations, slow rollback cycles, and opaque stack states.
+- **Versus OpenTofu:** While OpenTofu is an open-source drop-in fork, Terraform was chosen for native, first-class integration with HCP Terraform's managed workspace platform, automated speculative plans, and native OIDC credential exchange without additional management overhead.
+
+### 4.2 Who can change the infrastructure now, and how?
+- **No Direct Laptop Applies:** Developers no longer run `terraform apply` with admin AWS keys from local laptops.
+- **Pull Request & VCS Workflow:** Any infrastructure modification must be proposed as a branch and GitHub Pull Request.
+- **Automated Speculative Plans:** HCP Terraform automatically runs a speculative plan against the PR, posting the exact diff as a commit check for peer review.
+- **Automated Apply on Merge:** Only upon merging the PR into `main` does HCP Terraform trigger the remote `apply`, assuming the short-lived AWS IAM OIDC role (`arn:aws:iam::094209472391:role/hcp-terraform-ooad-lab7`).
+
+### 4.3 Where do secrets end up, including the state?
+- **Sensitive Variables in HCP Terraform:** Sensitive inputs (`database_url`, `google_client_secret`) are configured directly in the HCP Terraform workspace as sensitive variables. They are never written to `git`, `.env`, or `.tfvars`.
+- **State Storage:** The Terraform state file is stored encrypted at rest inside HCP Terraform. While the state file contains raw attribute values required for diffing, access to the state is strictly restricted to authorized workspace members and the HCP execution runner via RBAC.
+- **Dynamic AWS Credentials:** No AWS secret access keys exist anywhere; AWS access is granted exclusively through short-lived STS tokens via OpenID Connect (OIDC).
+
+### 4.4 What happens if HCP Terraform is down?
+- **No Impact on Running Infrastructure:** The existing AWS resources (Cognito User Pool, Lambdas, S3 bucket, Aurora, SQS) continue to operate normally without interruption. Running workloads do not query HCP Terraform.
+- **Break-Glass Emergency Procedure:** If HCP Terraform suffers an extended outage and emergency changes are needed, a privileged administrator can download the latest state snapshot, configure a local backend or temporary S3/DynamoDB backend, authenticate via local AWS CLI credentials, and execute emergency operations directly.
+
+---
+
+## 5. Consequences & Pipeline Integration
 
 - **Makefile Automation:** Stack output queries via CloudFormation were replaced with `$(TF) output -raw <key>`. Deployment commands (`aws-deploy-auth`, `aws-deploy-reports`, `aws-deploy-agenda`) now delegate to `infra-plan` to preview changes locally without applying.
 - **Continuous Deployment (Two Roads):** Infrastructure applies are strictly decoupled from application container pushes. Infrastructure updates are reviewed via HCP Terraform PR checks and applied automatically upon merge to `main`. Application code is built and deployed via GitHub Actions workflows.
