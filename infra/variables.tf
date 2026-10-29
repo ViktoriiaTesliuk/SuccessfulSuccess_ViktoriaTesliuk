@@ -1,3 +1,7 @@
+# =============================================================================
+# Infrastructure Variables for SuccessfulSuccess Application (Lab 7)
+# =============================================================================
+
 variable "project_name" {
   type        = string
   description = "Prefix for names of all resources in this project."
