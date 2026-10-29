@@ -1,0 +1,8 @@
+.git/
+node_modules/
+.next/
+backend/.venv/
+frontend/out/
+__pycache__/
+*.zip
+.DS_Store
