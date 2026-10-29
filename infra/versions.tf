@@ -32,6 +32,7 @@ provider "aws" {
     tags = {
       PROJECT_NAME = var.project_name
       ManagedBy    = "terraform"
+      Environment  = "dev"
     }
   }
 }
