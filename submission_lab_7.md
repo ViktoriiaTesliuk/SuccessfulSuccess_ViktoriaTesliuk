@@ -32,8 +32,11 @@
 
 - **Workspace:** `https://app.terraform.io/app/ooad-lab7/successfulsuccess-dev`
 - **Execution Mode:** `remote` (authenticated dynamically to AWS via OpenID Connect IAM Role `arn:aws:iam::094209472391:role/hcp-terraform-ooad-lab7`)
-- **VCS Connection:** Connected to GitHub repository `ViktoriiaTesliuk/SuccessfulSuccess_ViktoriaTesliuk` with working directory `infra`.
-- **Screenshot:** *(Attach screenshot showing the run overview with "Apply finished" and the trigger indicating the commit/merge from GitHub, e.g., `Triggered by push/merge`)*
+- **Run ID:** `run-3trkeh3grKLybvF2`
+- **Run Direct URL:** [https://app.terraform.io/app/ooad-lab7/workspaces/successfulsuccess-dev/runs/run-3trkeh3grKLybvF2](https://app.terraform.io/app/ooad-lab7/workspaces/successfulsuccess-dev/runs/run-3trkeh3grKLybvF2)
+- **Status:** **Apply finished**
+- **Trigger:** Triggered via GitHub Push (`Commit: feat(infra): add Environment tag to prove automated HCP Terraform pipeline`)
+- **Screenshot:** *(Screenshot of `run-3trkeh3grKLybvF2` showing Apply finished)*
 
 ---
 
